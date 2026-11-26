@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DELTA POST — Seaplane Mail Run</title>
+<link rel="icon" href="data:,">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a2230; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse at center, transparent 58%, rgba(20, 12, 6, 0.38) 100%);
+  }
+  #hud { position: fixed; inset: 0; z-index: 3; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; color: #f2e3c6; }
+  .panel { background: rgba(10, 14, 22, 0.55); border: 1px solid rgba(242, 227, 198, 0.25); border-radius: 6px; }
+  #missions { position: absolute; top: 14px; left: 14px; padding: 10px 12px; min-width: 250px; }
+  #missions .mission { font-size: 13px; letter-spacing: 0.04em; padding: 2px 0; opacity: 0.55; }
+  #missions .mission.active { opacity: 1; color: #ffd76a; }
+  #missions .mission.done { opacity: 0.85; color: #7fd08a; }
+  #missions .score { margin-top: 6px; font-size: 14px; font-weight: bold; color: #ffd76a; }
+  #timeRow { position: absolute; top: 14px; left: 280px; padding: 10px 12px; font-size: 14px; }
+  #compass { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); border-radius: 6px; }
+  #speedTape { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); border-radius: 6px; }
+  #altTape { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); border-radius: 6px; }
+  #minimap { position: absolute; right: 14px; bottom: 14px; border-radius: 6px; }
+  #gauges { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); border-radius: 6px; }
+  #bars { position: absolute; left: 14px; bottom: 14px; width: 220px; padding: 10px 12px; }
+  #bars .barRow { margin: 4px 0; }
+  #bars .barLabel { font-size: 11px; display: flex; justify-content: space-between; }
+  #bars .barTrack { height: 10px; background: rgba(255,255,255,0.12); border-radius: 5px; overflow: hidden; margin-top: 2px; }
+  #bars .barFill { height: 100%; border-radius: 5px; }
+  #fuelBar { background: #3fae5a; width: 100%; }
+  #fuelBar.low { background: #ff2a1a; }
+  #throttleBar { background: #ffd76a; width: 55%; }
+  #message {
+    position: absolute; top: 22%; left: 50%; transform: translateX(-50%);
+    font-size: 17px; font-weight: bold; letter-spacing: 0.05em; color: #ffd76a;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8); opacity: 0; transition: opacity 0.3s;
+    text-align: center; max-width: 80%;
+  }
+  #warnBanner {
+    display: none; position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+    background: rgba(120, 20, 8, 0.85); border: 1px solid #ff6b1a; color: #fff;
+    padding: 8px 18px; border-radius: 6px; font-size: 15px; font-weight: bold; letter-spacing: 0.06em;
+  }
+  #warnBanner.critical { animation: blink 0.7s steps(2) infinite; }
+  @keyframes blink { 50% { background: rgba(200, 30, 10, 0.95); } }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; pointer-events: auto;
+    background: linear-gradient(180deg, rgba(10, 16, 28, 0.55) 0%, rgba(40, 18, 8, 0.45) 100%);
+  }
+  #debrief { justify-content: center; padding-bottom: 150px; }
+  .overlay h1 {
+    font-family: Georgia, 'Times New Roman', serif; font-size: 64px; letter-spacing: 0.12em;
+    color: #ffd76a; text-shadow: 0 4px 24px rgba(0,0,0,0.7); margin-bottom: 6px;
+  }
+  .overlay h2 { font-size: 16px; font-weight: normal; letter-spacing: 0.28em; color: #f2e3c6; margin-bottom: 22px; }
+  .overlay p { font-size: 14px; line-height: 1.7; color: #f2e3c6; max-width: 560px; margin-bottom: 8px; }
+  .overlay .controls { font-size: 12px; color: rgba(242, 227, 198, 0.8); margin: 14px 0 22px; line-height: 1.9; }
+  .overlay .controls b { color: #ffd76a; }
+  .bigButton {
+    pointer-events: auto; cursor: pointer; font-family: inherit; font-size: 17px; font-weight: bold;
+    letter-spacing: 0.1em; color: #1a1206; background: #ffd76a; border: none; border-radius: 8px;
+    padding: 14px 34px; box-shadow: 0 4px 18px rgba(0,0,0,0.5);
+  }
+  .bigButton:hover { background: #ffe08a; }
+  #debriefGrade { font-family: Georgia, serif; font-size: 96px; color: #ffd76a; text-shadow: 0 4px 24px rgba(0,0,0,0.7); line-height: 1; margin: 8px 0; }
+  #debriefScore { font-size: 22px; font-weight: bold; color: #fff; margin-bottom: 14px; }
+  #debriefBody { font-size: 14px; line-height: 1.8; color: #f2e3c6; margin-bottom: 20px; }
+  #debriefBody .debrief-foot { margin-top: 10px; color: rgba(242, 227, 198, 0.7); font-size: 12px; }
+  #pause { font-size: 34px; letter-spacing: 0.3em; color: #ffd76a; }
+  #score { display: none; }
+  /* During the debrief the instruments are 0 kt / 1 ft and the overlay
+     owns the screen — hide them so nothing collides with the grade. */
+  #hud.debrief-mode #compass, #hud.debrief-mode #speedTape, #hud.debrief-mode #altTape,
+  #hud.debrief-mode #minimap, #hud.debrief-mode #gauges, #hud.debrief-mode #bars,
+  #hud.debrief-mode #message { display: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="vignette"></div>
+<div id="hud">
+  <div id="missions" class="panel"></div>
+  <div id="timeRow" class="panel">TIME <span id="time">00:00</span></div>
+  <canvas id="compass" width="480" height="40"></canvas>
+  <canvas id="speedTape" width="70" height="260"></canvas>
+  <canvas id="altTape" width="70" height="260"></canvas>
+  <canvas id="minimap" width="200" height="200"></canvas>
+  <canvas id="gauges" width="480" height="130"></canvas>
+  <div id="bars" class="panel">
+    <div class="barRow">
+      <div class="barLabel"><span id="throttleLabel">THR 55%</span><span>SHIFT / CTRL</span></div>
+      <div class="barTrack"><div id="throttleBar" class="barFill"></div></div>
+    </div>
+    <div class="barRow">
+      <div class="barLabel"><span id="fuelLabel">FUEL 100%</span><span>XWIND →</span></div>
+      <div class="barTrack"><div id="fuelBar" class="barFill"></div></div>
+    </div>
+  </div>
+  <div id="message"></div>
+  <div id="warnBanner"></div>
+  <div id="score"></div>
+
+  <div id="title" class="overlay">
+    <h1>DELTA POST</h1>
+    <h2>SEAPLANE MAIL RUN · RIVER DELTA · DAWN</h2>
+    <p>One sortie, three jobs. Fly the ring slalom down the river, drop the
+    mail on the floating dock, then bring her home on the water runway —
+    graded on sink rate, heading and centreline. The tank is not generous.
+    The crosswind is real.</p>
+    <div class="controls">
+      <b>↑ / ↓</b> pitch &nbsp;·&nbsp; <b>← / →</b> bank &nbsp;·&nbsp; <b>SHIFT / CTRL</b> throttle<br>
+      <b>SPACE</b> drop mail &nbsp;·&nbsp; <b>C</b> camera &nbsp;·&nbsp; <b>P</b> pause &nbsp;·&nbsp; <b>M</b> mute
+    </div>
+    <button id="titleStart" class="bigButton">START THE SORTIE</button>
+  </div>
+
+  <div id="debrief" class="overlay" style="display:none">
+    <h2 id="debriefTitle">Landed. Sortie complete.</h2>
+    <div id="debriefGrade">A</div>
+    <div id="debriefScore">0 PTS</div>
+    <div id="debriefBody"></div>
+    <button id="debriefRestart" class="bigButton">FLY AGAIN</button>
+  </div>
+
+  <div id="pause" class="overlay" style="display:none">PAUSED — PRESS P</div>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js",
+    "three/addons/": "./vendor/three/addons/"
+  }
+}
+</script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
