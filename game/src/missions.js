@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { DELTA_POST, MISSION_NAMES } from './config.js';
 import { state, Phases, MissionIds, setMessage, resetState } from './gameState.js';
 import { emit, Events } from './eventBus.js';
-import { RING_POSITIONS, DOCK_POS, worldRefs } from './world.js';
+import { RING_POSITIONS, DOCK_POS, worldRefs, isWaterAt } from './world.js';
 import { gradeTouchdown, landingSummary } from './landingGrader.js';
 import { fuelBonus } from './fuelSystem.js';
 import { resetFlight } from './flight.js';
@@ -53,6 +53,7 @@ export function distanceToDock() {
 }
 
 function advanceMission() {
+  if (state.missionIndex === MissionIds.RINGS) state.ringTime = state.elapsed;
   state.missionIndex += 1;
   if (state.missionIndex === MissionIds.DROP) {
     emit(Events.MISSION_COMPLETE, { mission: 0, name: MISSION_NAMES[0] });
@@ -137,6 +138,7 @@ function updatePackage(dt) {
     if (miss <= M.dropRadiusM) {
       state.packageState = 'delivered';
       state.dropDelivered = true;
+      state.dropMiss = Math.round(miss);
       state.score += M.dropScore;
       emit(Events.MAIL_DELIVERED, { score: state.score, miss: Math.round(miss) });
       setMessage(`MAIL DELIVERED — ${M.dropScore} PTS (miss ${Math.round(miss)} m)`, 4);
@@ -164,6 +166,21 @@ function buildDebrief(reason, landingResult = null) {
     `Rings: ${state.ringsPassed}/${M.ringCount} × ${M.ringScore} pts`,
     `Mail drop: ${state.dropDelivered ? `delivered +${M.dropScore}` : 'not delivered +0'}`,
   ];
+  // Published 1-3★ thresholds per mission (Drone Range pattern — the
+  // same thresholds are printed on the title screen). Display only:
+  // stars never change the S/A/B/C/D grade or the points.
+  const star = (n) => '★'.repeat(n) + '☆'.repeat(Math.max(0, 3 - n));
+  const ringStars = state.ringTime == null ? 0
+    : (state.ringTime <= 70 ? 3 : state.ringTime <= 90 ? 2 : 1);
+  const dropStars = !state.dropDelivered ? 0
+    : (state.dropMiss <= 5 ? 3 : state.dropMiss <= 10 ? 2 : 1);
+  const landStars = !landingResult ? 0
+    : (landingResult.grade === 'S' || landingResult.grade === 'A' ? 3
+      : landingResult.grade === 'B' ? 2 : 1);
+  lines.push(`Rings ${star(ringStars)} — ${state.ringTime != null ? `${Math.round(state.ringTime)} s` : (state.ringsPassed >= M.ringCount ? 'time not recorded' : 'not finished')} · ★★★ ≤ 70 s`);
+  lines.push(`Mail ${star(dropStars)} — ${state.dropDelivered ? `miss ${state.dropMiss} m` : 'not delivered'} · ★★★ ≤ 5 m`);
+  if (landingResult) lines.push(`Landing ${star(landStars)} — grade ${landingResult.grade} · ★★★ = A`);
+  if (state.lowPassCount > 0) lines.push(`Low passes: ${state.lowPassCount} × 25 pts`);
   if (landingResult) {
     lines.push(`Landing ${landingResult.grade} +${landingResult.points}`);
     lines.push(...landingSummary(landingResult));
@@ -217,4 +234,16 @@ export function updateMissions(dt) {
   state.elapsed += dt;
   if (state.missionIndex === MissionIds.RINGS) checkRings();
   if (state.missionIndex === MissionIds.DROP) updatePackage(dt);
+  // Risk/reward (X hunt, wingsuit lesson): a low pass through the reeds
+  // — fast, low, over land — pays +25, at most once per 10 s. One `if`,
+  // one debrief line; the flight model never sees it.
+  if (state.missionIndex <= 1 && state.altitudeAgl < 8 && state.speed > 30
+      && !isWaterAt(state.position.x, state.position.z)
+      && state.elapsed - state.lastLowPassAt > 10) {
+    state.lastLowPassAt = state.elapsed;
+    state.lowPassCount += 1;
+    state.lowPassPoints += 25;
+    state.score += 25;
+    setMessage('LOW PASS THROUGH THE REEDS +25', 2.5);
+  }
 }

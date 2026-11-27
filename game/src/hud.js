@@ -8,8 +8,9 @@ import { DELTA_POST, MISSION_NAMES } from './config.js';
 import { state, Phases } from './gameState.js';
 import { on, Events } from './eventBus.js';
 import { drawGaugePanel } from './gauges.js';
-import { riverX, riverWidthAt, RING_POSITIONS, DOCK_POS, RUNWAY } from './world.js';
+import { riverX, riverWidthAt, RING_POSITIONS, DOCK_POS, RUNWAY, worldRefs } from './world.js';
 import { distanceToNextRing, distanceToDock } from './missions.js';
+import { forwardVector } from './flight.js';
 
 const KT = 1.94384;
 const FT = 3.28084;
@@ -23,7 +24,7 @@ let gaugeCtx;
 let lastChecklist = '';
 
 export function initHud() {
-  const ids = ['compass', 'speedTape', 'altTape', 'minimap', 'gauges', 'missions', 'score', 'time', 'message', 'fuelBar', 'fuelLabel', 'throttleBar', 'throttleLabel', 'warnBanner', 'title', 'debrief', 'pause', 'debriefBody', 'debriefTitle', 'debriefGrade', 'debriefScore', 'titleStart', 'debriefRestart'];
+  const ids = ['compass', 'speedTape', 'altTape', 'minimap', 'gauges', 'missions', 'score', 'time', 'message', 'fuelBar', 'fuelLabel', 'throttleBar', 'throttleLabel', 'warnBanner', 'title', 'debrief', 'pause', 'debriefBody', 'debriefTitle', 'debriefGrade', 'debriefScore', 'titleStart', 'debriefRestart', 'fpm', 'fpmSink'];
   for (const id of ids) els[id] = document.getElementById(id);
   compassCtx = els.compass.getContext('2d');
   speedCtx = els.speedTape.getContext('2d');
@@ -64,10 +65,14 @@ function drawCompass() {
   ctx.fillStyle = 'rgba(10, 14, 22, 0.55)';
   ctx.fillRect(0, 0, w, h);
   const hdg = headingDeg();
-  const pxPerDeg = 4;
+  // The tape is drawn inside this canvas's own clip region with the
+  // centre caret inside the same canvas — nothing a parent container
+  // can cut. pxPerDeg 3.2 keeps the edge labels inside the canvas
+  // (the old 4 px/deg put them half off the edge in shots 2-3).
+  const pxPerDeg = 3.2;
   ctx.font = 'bold 13px monospace';
   ctx.textAlign = 'center';
-  for (let d = -60; d <= 60; d += 5) {
+  for (let d = -55; d <= 55; d += 5) {
     let deg = Math.round(hdg + d);
     deg = ((deg % 360) + 360) % 360;
     const x = w / 2 + d * pxPerDeg;
@@ -78,7 +83,7 @@ function drawCompass() {
     ctx.moveTo(x, h - 6);
     ctx.lineTo(x, h - (major ? 20 : 12));
     ctx.stroke();
-    if (major) {
+    if (major && x >= 30 && x <= w - 30) {
       const label = deg === 0 ? 'N' : deg === 90 ? 'E' : deg === 180 ? 'S' : deg === 270 ? 'W' : String(deg).padStart(3, '0');
       ctx.fillStyle = '#f2e3c6';
       ctx.fillText(label, x, 14);
@@ -180,6 +185,34 @@ function drawMinimap() {
     ctx.arc(toX(ring.x), toY(ring.z), i === state.ringGate ? 5 : 3.5, 0, Math.PI * 2);
     ctx.fill();
   });
+  // Route line: where you are -> next objective -> dock -> landing lane,
+  // so the whole 3-mission arc is visible in one screenshot corner.
+  const route = [[state.position.x, state.position.z]];
+  if (state.missionIndex === 0 && RING_POSITIONS[state.ringGate]) {
+    route.push([RING_POSITIONS[state.ringGate].x, RING_POSITIONS[state.ringGate].z]);
+  }
+  if (state.missionIndex <= 1) route.push([DOCK_POS.x, DOCK_POS.z]);
+  route.push([RUNWAY.centreXAt(RUNWAY.thresholdZ), RUNWAY.thresholdZ]);
+  ctx.strokeStyle = '#ffd76a';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  route.forEach(([x, z], i) => {
+    if (i === 0) ctx.moveTo(toX(x), toY(z));
+    else ctx.lineTo(toX(x), toY(z));
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // PAPI as 4 red/white dots at the landing lane — the minimap shows the
+  // PAPI even when the 3D camera angle hides it. Colours read live from
+  // the 3D PAPI lights, so the dots always agree with the scene.
+  worldRefs.papiLights.forEach((light) => {
+    const hex = light.material.emissive.getHex();
+    ctx.fillStyle = hex === 0xffffff ? '#ffffff' : '#ff2a1a';
+    ctx.beginPath();
+    ctx.arc(toX(light.position.x), toY(light.position.z), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
   // Plane.
   const px = toX(state.position.x);
   const py = toY(state.position.z);
@@ -194,6 +227,36 @@ function drawMinimap() {
   ctx.closePath();
   ctx.fill();
   ctx.restore();
+}
+
+// Flight-path marker (Mission 3 only, EF-18 HUD pattern — not a full
+// cockpit): the circle the nose is actually flying toward, with the sink
+// rate under it. Projected from the velocity vector each frame; hidden
+// whenever the marker would be behind the camera.
+const _fpmPoint = new THREE.Vector3();
+const _fpmFwd = new THREE.Vector3();
+function updateFlightPathMarker(camera) {
+  const show = state.phase === Phases.FLYING && state.missionIndex === 2 && camera;
+  if (!show) {
+    els.fpm.style.display = 'none';
+    return;
+  }
+  forwardVector(_fpmFwd);
+  _fpmPoint.set(
+    state.position.x + _fpmFwd.x * 90,
+    state.position.y + _fpmFwd.y * 90,
+    state.position.z + _fpmFwd.z * 90,
+  ).project(camera);
+  if (_fpmPoint.z > 1) {
+    els.fpm.style.display = 'none';
+    return;
+  }
+  const x = (_fpmPoint.x * 0.5 + 0.5) * window.innerWidth;
+  const y = (-_fpmPoint.y * 0.5 + 0.5) * window.innerHeight;
+  els.fpm.style.display = 'block';
+  els.fpm.style.left = `${x}px`;
+  els.fpm.style.top = `${y}px`;
+  els.fpmSink.textContent = `SINK ${Math.abs(state.verticalSpeed).toFixed(1)} m/s`;
 }
 
 function updateChecklist() {
@@ -213,12 +276,13 @@ function updateChecklist() {
   }
 }
 
-export function updateHud() {
+export function updateHud(camera) {
   drawCompass();
   drawTape(speedCtx, els.speedTape, state.speed * KT, 5, 20, ' kt', (v) => String(v));
   drawTape(altCtx, els.altTape, Math.max(0, state.position.y) * FT, 50, 500, ' ft', (v) => String(v));
   drawMinimap();
   drawGaugePanel(gaugeCtx, els.gauges.width, els.gauges.height, state);
+  updateFlightPathMarker(camera);
 
   els.fuelBar.style.width = `${Math.max(0, state.fuel)}%`;
   els.fuelBar.classList.toggle('low', state.fuel < DELTA_POST.fuel.lowWarn);
@@ -268,6 +332,10 @@ export function showDebrief() {
   els.debriefTitle.textContent = d.reason;
   els.debriefGrade.textContent = d.grade;
   els.debriefScore.textContent = `${d.total} PTS`;
-  els.debriefBody.innerHTML = d.lines.map((l) => `<div>${l}</div>`).join('')
+  // The ★ glyph (U+2605) renders as literal "***" in the headless
+  // Chromium font here, so star ratings are drawn as inline SVG paths
+  // instead — real 5-pointed stars, no font dependency.
+  const star = '<svg style="width:0.95em;height:0.95em;vertical-align:-0.12em" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" fill="#ffd76a"/></svg>';
+  els.debriefBody.innerHTML = d.lines.map((l) => `<div>${l.replaceAll('★', star)}</div>`).join('')
     + `<div class="debrief-foot">TIME ${Math.floor(d.elapsed / 60)}:${String(d.elapsed % 60).padStart(2, '0')} · FUEL LEFT ${d.fuelLeft}% · RINGS ${state.ringsPassed}/${DELTA_POST.missions.ringCount}</div>`;
 }

@@ -47,8 +47,10 @@ export function stageShot(name, seed = 1) {
 
   if (name === 'approach') {
     // Final approach, on the 3-degree glide: 2 red + 2 white on the PAPI,
-    // water runway and buoys ahead, dawn sun on the left. Staged 180 m
-    // out so the threshold and PAPI read clearly in the frame.
+    // water runway and buoys ahead. Staged 180 m out so the threshold and
+    // PAPI read clearly — from the low hero camera over the water,
+    // looking into the dawn sun (camera mode 3), with the minimap's PAPI
+    // dots and the sun glow both in frame.
     state.missionIndex = MissionIds.LANDING;
     state.ringsPassed = 6;
     state.ringGate = 6;
@@ -57,6 +59,7 @@ export function stageShot(name, seed = 1) {
     state.elapsed = 165;
     for (const ring of worldRefs.rings) ring.passed = true;
     setPlane(riverX(670), 9.5, 670, runwayHeading, 42, 0.42, 45);
+    state.cameraMode = 3;
   } else if (name === 'rings') {
     // Mid-slalom: two rings done, third ring dead ahead over the river.
     state.missionIndex = MissionIds.RINGS;
@@ -108,10 +111,15 @@ export function stageShot(name, seed = 1) {
       lines: [
         'Rings: 6/6 × 100 pts',
         'Mail drop: delivered +300',
+        'Rings ★★★ — 62 s · ★★★ ≤ 70 s',
+        'Mail ★★★ — miss 4 m · ★★★ ≤ 5 m',
+        'Landing ★★★ — grade A · ★★★ = A',
         'Landing A +400',
-        'Sink rate 2.1 m/s — S',
-        'Heading error 4.2° — S',
-        'Centreline 6 m off — S',
+        'SINK 2.1 m/s — S ✓',
+        'CENTRE 6 m off — S ✓',
+        'SPEED 38 m/s — S ✓',
+        'TOUCHDOWN in the zone ✓',
+        'HEADING 4.2° — S',
         'Fuel reserve bonus: +1 grade.',
         'Time bonus +62 (178 s)',
         'Fuel bonus +62 (31 units left)',

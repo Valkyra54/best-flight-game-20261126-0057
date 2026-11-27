@@ -43,6 +43,11 @@ export function createInitialState() {
     packageState: 'idle', // idle | falling | delivered | splashed
     packagePos: null,
     touchdown: null, // { verticalSpeed, headingErrorDeg, centrelineM, grade }
+    ringTime: null, // elapsed seconds when the 6th ring was passed
+    dropMiss: null, // metres off the dock target on the delivered drop
+    lowPassCount: 0,
+    lowPassPoints: 0,
+    lastLowPassAt: -99, // elapsed seconds of the last low-pass bonus
     score: 0,
     elapsed: 0,
     missionStartTime: 0,

@@ -2,6 +2,7 @@
 // for events (ring chime, drop, splash, thud, click), a small WebAudio
 // oscillator engine hum that follows the throttle. No audio files.
 
+import * as THREE from 'three';
 import { DELTA_POST } from './config.js';
 import { state, Phases } from './gameState.js';
 import { on, Events } from './eventBus.js';
@@ -39,6 +40,35 @@ let engineOsc = null;
 let engineOsc2 = null;
 let engineGain = null;
 let engineFilter = null;
+let windGain = null;
+let windFilter = null;
+
+function ensureWind() {
+  // Looping filtered noise for wind rush, gain driven by speed. Garnish
+  // only — any failure is swallowed, sound must never break the game.
+  if (!audioCtx || windGain) return;
+  try {
+    const len = audioCtx.sampleRate * 2;
+    const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i += 1) data[i] = Math.random() * 2 - 1;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    windFilter = audioCtx.createBiquadFilter();
+    windFilter.type = 'bandpass';
+    windFilter.frequency.value = 500;
+    windFilter.Q.value = 0.6;
+    windGain = audioCtx.createGain();
+    windGain.gain.value = 0;
+    src.connect(windFilter);
+    windFilter.connect(windGain);
+    windGain.connect(audioCtx.destination);
+    src.start();
+  } catch (error) {
+    windGain = null;
+  }
+}
 
 function ensureEngine() {
   if (audioCtx) return;
@@ -81,6 +111,14 @@ export function updateEngineSound() {
   engineOsc.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.1);
   engineOsc2.frequency.setTargetAtTime(freq * 2, audioCtx.currentTime, 0.1);
   engineFilter.frequency.setTargetAtTime(220 + state.throttle * 500, audioCtx.currentTime, 0.1);
+  // Wind rush scales with airspeed, not throttle.
+  ensureWind();
+  if (windGain) {
+    const speedFrac = THREE.MathUtils.clamp(state.speed / DELTA_POST.flight.maxSpeed, 0, 1);
+    const windTarget = state.phase === Phases.FLYING && !state.muted ? speedFrac * speedFrac * 0.1 : 0;
+    windGain.gain.setTargetAtTime(windTarget, audioCtx.currentTime, 0.15);
+    windFilter.frequency.setTargetAtTime(300 + state.speed * 8, audioCtx.currentTime, 0.15);
+  }
 }
 
 export function initAudio() {

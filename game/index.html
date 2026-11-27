@@ -13,6 +13,13 @@
     position: fixed; inset: 0; pointer-events: none; z-index: 2;
     background: radial-gradient(ellipse at center, transparent 58%, rgba(20, 12, 6, 0.38) 100%);
   }
+  /* Warm dawn grade: a faint amber overlay under the HUD layer, zero
+     WebGL cost. ACES tone mapping already lives in render.js. */
+  #warmth {
+    position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse at 50% 42%, rgba(255, 175, 95, 0.09), rgba(255, 140, 60, 0.10) 100%);
+    mix-blend-mode: overlay;
+  }
   #hud { position: fixed; inset: 0; z-index: 3; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; color: #f2e3c6; }
   .panel { background: rgba(10, 14, 22, 0.55); border: 1px solid rgba(242, 227, 198, 0.25); border-radius: 6px; }
   #missions { position: absolute; top: 14px; left: 14px; padding: 10px 12px; min-width: 250px; }
@@ -72,6 +79,26 @@
   #debriefBody { font-size: 14px; line-height: 1.8; color: #f2e3c6; margin-bottom: 20px; }
   #debriefBody .debrief-foot { margin-top: 10px; color: rgba(242, 227, 198, 0.7); font-size: 12px; }
   #pause { font-size: 34px; letter-spacing: 0.3em; color: #ffd76a; }
+  /* Flight-path marker (Mission 3 only): the circle the nose is actually
+     flying toward, with the sink rate under it. Positioned by JS. */
+  #fpm {
+    display: none; position: absolute; width: 54px; height: 54px; margin: -27px 0 0 -27px;
+    pointer-events: none;
+  }
+  #fpm .fpm-ring {
+    position: absolute; inset: 6px; border: 2px solid #ffd76a; border-radius: 50%;
+    box-shadow: 0 0 6px rgba(0,0,0,0.6);
+  }
+  #fpm .fpm-ring::before, #fpm .fpm-ring::after {
+    content: ''; position: absolute; top: 50%; width: 12px; height: 2px; background: #ffd76a;
+  }
+  #fpm .fpm-ring::before { left: -14px; }
+  #fpm .fpm-ring::after { right: -14px; }
+  #fpmSink {
+    position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; font-weight: bold; color: #ffd76a; white-space: nowrap;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  }
   #score { display: none; }
   /* During the debrief the instruments are 0 kt / 1 ft and the overlay
      owns the screen — hide them so nothing collides with the grade. */
@@ -83,6 +110,7 @@
 <body>
 <canvas id="game"></canvas>
 <div id="vignette"></div>
+<div id="warmth"></div>
 <div id="hud">
   <div id="missions" class="panel"></div>
   <div id="timeRow" class="panel">TIME <span id="time">00:00</span></div>
@@ -103,6 +131,7 @@
   </div>
   <div id="message"></div>
   <div id="warnBanner"></div>
+  <div id="fpm"><div class="fpm-ring"></div><div id="fpmSink">SINK 0.0 m/s</div></div>
   <div id="score"></div>
 
   <div id="title" class="overlay">
@@ -116,6 +145,8 @@
       <b>↑ / ↓</b> pitch &nbsp;·&nbsp; <b>← / →</b> bank &nbsp;·&nbsp; <b>SHIFT / CTRL</b> throttle<br>
       <b>SPACE</b> drop mail &nbsp;·&nbsp; <b>C</b> camera &nbsp;·&nbsp; <b>P</b> pause &nbsp;·&nbsp; <b>M</b> mute
     </div>
+    <div class="controls" style="margin-top:-8px">STARS — RINGS ★★★ ≤ 70 s &nbsp;·&nbsp; MAIL ★★★ miss ≤ 5 m &nbsp;·&nbsp; LANDING ★★★ grade A<br>
+    LOW PASS through the reeds, fast and low: +25</div>
     <button id="titleStart" class="bigButton">START THE SORTIE</button>
   </div>
 

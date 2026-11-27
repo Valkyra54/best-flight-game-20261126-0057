@@ -39,7 +39,11 @@ export function terrainHeightAt(x, z) {
   const d = Math.abs(x - riverX(z));
   const half = riverWidthAt(z) / 2;
   const carve = sstep(half + 60, half - 10, d); // 1 inside the river
-  return hills * (1 - carve) + -6 * carve;
+  // Raised bank lip (Forest Stroll pattern): a thin natural edge where
+  // the water meets the land, ~0.7 m high, land-side only. The flight
+  // model reads this same function, so the lip is real terrain, not paint.
+  const lip = 0.7 * Math.exp(-((d - (half + 7)) ** 2) / 12) * (1 - carve);
+  return hills * (1 - carve) + -6 * carve + lip;
 }
 
 export function isWaterAt(x, z) {
@@ -79,6 +83,66 @@ const SUN_DIR = (() => {
 
 export const sunDirection = SUN_DIR.clone();
 
+// The VISIBLE sun disc sits higher than the true dawn sun: the real sun
+// (7 deg elevation) is behind the east bank crest (~18 deg from water
+// level) everywhere on the approach — probed with the exact terrain
+// function, z 350..840 all BLOCKED — so a disc on the true direction
+// would never show. The disc is parked at 24 deg on the SAME azimuth,
+// so the glitter path, the glow and the lighting still agree in
+// direction; only the depicted height is lifted above the crest. The
+// Sky, the water glint and the directional light stay on the true sun.
+const VISUAL_SUN_DIR = (() => {
+  const el = THREE.MathUtils.degToRad(24);
+  const az = THREE.MathUtils.degToRad(76); // true sun is 92 deg — the
+  // 16 deg shift puts the disc clear of the top-left mission panel.
+  return new THREE.Vector3(
+    Math.cos(el) * Math.sin(az),
+    Math.sin(el),
+    Math.cos(el) * Math.cos(az),
+  ).normalize();
+})();
+
+// Shared wind uniforms: one uTime drives tree sway, reed sway and gull
+// flap; uWindAmp follows the 6 kt crosswind so the trees visibly agree
+// with the flight model (hexkingdom pattern: ~0 CPU, zero per-frame JS).
+export const windUniforms = {
+  uTime: { value: 0 },
+  uWindAmp: { value: 0.35 },
+};
+
+// Patch a material so its canopy tips sway sideways in the wind while
+// its base stays planted. `height` is the geometry's local Y span and
+// `baseY` its lowest local Y; the weight is ((localY - baseY) / height)^2,
+// 0 at the base, 1 at the tip.
+export function addWindSway(material, height, baseY = -height / 2) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = windUniforms.uTime;
+    shader.uniforms.uWindAmp = windUniforms.uWindAmp;
+    // GLSL is strictly typed: a float divided by an int literal fails to
+    // compile, so the injected numbers always carry a decimal point.
+    const f = (n) => (Number.isInteger(n) ? `${n}.0` : String(n));
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nuniform float uTime;\nuniform float uWindAmp;',
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+#ifdef USE_INSTANCING
+        {
+          vec2 iPos = vec2(instanceMatrix[3][0], instanceMatrix[3][2]);
+          float swayPhase = uTime * 1.1 + iPos.x * 0.15 + iPos.y * 0.13;
+          float swayW = pow(clamp((position.y - (${f(baseY)})) / (${f(height)}), 0.0, 1.0), 2.0);
+          transformed.x += sin(swayPhase) * swayW * uWindAmp;
+          transformed.z += cos(swayPhase * 0.7) * swayW * uWindAmp * 0.6;
+        }
+#endif
+`,
+      );
+  };
+}
+
 // --- Procedural water normal map (DataTexture, generated in code) ---
 function generateWaterNormalsTexture() {
   const size = 256;
@@ -104,7 +168,25 @@ function generateWaterNormalsTexture() {
   return tex;
 }
 
-// --- Radial glow sprite texture (sun halo), generated in code ---
+// --- Sun disc texture: a hard bright core that falls off fast, so the
+// disc reads as a sun and not another soft blob ---
+function generateSunDiscTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  g.addColorStop(0, 'rgba(255, 244, 214, 1)');
+  g.addColorStop(0.55, 'rgba(255, 210, 140, 1)');
+  g.addColorStop(0.68, 'rgba(255, 175, 90, 0.9)');
+  g.addColorStop(0.78, 'rgba(255, 160, 80, 0.12)');
+  g.addColorStop(1, 'rgba(255, 150, 80, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 function generateGlowTexture() {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
@@ -131,6 +213,7 @@ export const worldRefs = {
   sky: null,
   sunLight: null,
   sunTarget: null,
+  foam: null, // shoreline foam strip material (opacity pulses)
 };
 
 function buildTerrain(scene) {
@@ -142,24 +225,25 @@ function buildTerrain(scene) {
   const grass = new THREE.Color(0x4d7a3a);
   const deep = new THREE.Color(0x2e5230);
   const mud = new THREE.Color(0x7a5c40);
+  const wetSand = new THREE.Color(0x8a6f4d); // damp band just above the waterline
   const tmp = new THREE.Color();
   for (let i = 0; i < pos.count; i += 1) {
     const x = pos.getX(i);
     const z = pos.getZ(i);
     const h = terrainHeightAt(x, z);
     pos.setY(i, h);
-    const d = Math.abs(x - riverX(z));
-    const half = riverWidthAt(z) / 2;
+    // Wet edge baked by height (the shoreline is where h is low — hill
+    // height varies, so distance-to-river alone cannot find it): dark
+    // riverbed under water, damp sand at the waterline, dry sand, grass.
     if (h < 1.5) tmp.copy(sand).lerp(mud, sstep(1.5, -2, h));
-    else if (h < 14) tmp.copy(sand).lerp(grass, sstep(3, 10, h));
+    else if (h < 4) tmp.copy(wetSand);
+    else if (h < 14) tmp.copy(sand).lerp(grass, sstep(4, 12, h));
     else tmp.copy(grass).lerp(deep, sstep(14, 55, h));
     // A little tonal noise so the ground is not a flat wash.
     const v = 0.92 + 0.16 * noise.noise(x * 0.05, z * 0.05);
     colors[i * 3] = tmp.r * v;
     colors[i * 3 + 1] = tmp.g * v;
     colors[i * 3 + 2] = tmp.b * v;
-    void d;
-    void half;
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geo.computeVertexNormals();
@@ -174,8 +258,8 @@ function buildSkyAndWater(scene) {
   sky.scale.setScalar(6000);
   sky.material.uniforms.turbidity.value = DELTA_POST.sun.turbidity;
   sky.material.uniforms.rayleigh.value = DELTA_POST.sun.rayleigh;
-  sky.material.uniforms.mieCoefficient.value = 0.008;
-  sky.material.uniforms.mieDirectionalG.value = 0.85;
+  sky.material.uniforms.mieCoefficient.value = 0.0012;
+  sky.material.uniforms.mieDirectionalG.value = 0.88;
   sky.material.uniforms.sunPosition.value.copy(SUN_DIR);
   scene.add(sky);
   worldRefs.sky = sky;
@@ -196,18 +280,44 @@ function buildSkyAndWater(scene) {
   scene.add(water);
   worldRefs.water = water;
 
-  // Warm sun halo sprite, parked on the sun direction far away.
-  const glow = new THREE.Sprite(
-    new THREE.SpriteMaterial({
-      map: generateGlowTexture(),
+  // Dawn sun: a bright disc + 3 concentric glow sprites (solar-system
+  // corona pattern), all parked on the sun direction far away. The disc
+  // is the light source the eye finds; the layered glows make the falloff
+  // soft instead of a hard disc. The directional light already shares
+  // this azimuth, so sprite and scene lighting agree.
+  const glowTex = generateGlowTexture();
+  const sunDisc = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: generateSunDiscTexture(),
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0.95,
+    // The disc sits 4200 m out: with the default fog it would be ~97%
+    // fogged away (FogExp2 0.00045), which is why no hard disc ever
+    // showed — only the Sky halo. Fog off so the disc actually reads.
+    fog: false,
+  }));
+  sunDisc.position.copy(VISUAL_SUN_DIR).multiplyScalar(4200);
+  sunDisc.scale.setScalar(420);
+  scene.add(sunDisc);
+  const glowLayers = [
+    { scale: 550, opacity: 0.22 },
+    { scale: 1100, opacity: 0.07 },
+    { scale: 1600, opacity: 0.02 },
+  ];
+  for (const layer of glowLayers) {
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex,
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-    }),
-  );
-  glow.position.copy(SUN_DIR).multiplyScalar(4200);
-  glow.scale.setScalar(1600);
-  scene.add(glow);
+      opacity: layer.opacity,
+      fog: false,
+    }));
+    glow.position.copy(VISUAL_SUN_DIR).multiplyScalar(4200);
+    glow.scale.setScalar(layer.scale);
+    scene.add(glow);
+  }
 
   // Hemisphere + key light. The key light follows the plane so shadows
   // stay crisp where the action is.
@@ -234,18 +344,36 @@ function buildSkyAndWater(scene) {
 }
 
 function buildTrees(scene, rng) {
+  // Three silhouettes from one trunk + one cone (Rand Monster archetype
+  // pattern), varied by per-instance non-uniform scale — same 2 draw
+  // calls as before, 3x the variety. Sentinel: tall, narrow, far bank.
+  // Grove: wide, low canopy, mid-ground. Weeping: wide, flat, drooping
+  // over the dock approach.
+  const VARIANTS = [
+    { weight: 0.4, trunkY: 1.15, canopyX: 0.75, canopyY: 1.45, canopyDy: 0 },
+    { weight: 0.35, trunkY: 0.9, canopyX: 1.5, canopyY: 0.7, canopyDy: -0.12 },
+    { weight: 0.25, trunkY: 0.85, canopyX: 1.35, canopyY: 0.5, canopyDy: -0.2 },
+  ];
   const trunkGeo = new THREE.CylinderGeometry(0.35, 0.55, 5, 6);
   const canopyGeo = new THREE.ConeGeometry(3.2, 9, 7);
+  // Root flare: a squashed 8-sided cone at the trunk foot, sinking
+  // slightly into the ground — the tree reads as planted, not stuck on.
+  const rootGeo = new THREE.ConeGeometry(1.5, 1.3, 8);
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 });
   const canopyMat = new THREE.MeshStandardMaterial({ color: 0x2f5d33, roughness: 1 });
+  const rootMat = new THREE.MeshStandardMaterial({ color: 0x5d3f26, roughness: 1 });
+  addWindSway(canopyMat, 9, -4.5);
   const count = 620;
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
   const canopies = new THREE.InstancedMesh(canopyGeo, canopyMat, count);
+  const roots = new THREE.InstancedMesh(rootGeo, rootMat, count);
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
   const p = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
+  const canopyCol = new THREE.Color();
+  const trunkCol = new THREE.Color();
   let placed = 0;
   let guard = 0;
   while (placed < count && guard < count * 40) {
@@ -257,23 +385,237 @@ function buildTrees(scene, rng) {
     if (Math.abs(x - riverX(z)) < riverWidthAt(z) / 2 + 26) continue;
     if (z > 800 && z < 1200 && Math.abs(x - riverX(z)) < 90) continue; // keep the runway clear
     if (Math.hypot(x - DOCK_POS.x, z - DOCK_POS.z) < 60) continue;
+    const roll = rng.nextFloat();
+    const variant = roll < VARIANTS[0].weight ? VARIANTS[0]
+      : roll < VARIANTS[0].weight + VARIANTS[1].weight ? VARIANTS[1] : VARIANTS[2];
     const scale = rng.range(0.8, 1.7);
     q.setFromAxisAngle(up, rng.range(0, Math.PI * 2));
-    p.set(x, h + 2.2 * scale, z);
-    s.setScalar(scale);
+    // Trunk: taller for the sentinel, shorter for the grove/weeping.
+    p.set(x, h + 2.2 * scale * variant.trunkY, z);
+    s.set(scale, scale * variant.trunkY, scale);
     m.compose(p, q, s);
     trunks.setMatrixAt(placed, m);
-    p.y = h + (5 + 4.2) * scale;
+    // Canopy: non-uniform scale per variant, top of the trunk.
+    p.y = h + (5 * variant.trunkY + 4.2 * variant.canopyY + variant.canopyDy * 9) * scale;
+    s.set(scale * variant.canopyX, scale * variant.canopyY, scale * variant.canopyX);
     m.compose(p, q, s);
     canopies.setMatrixAt(placed, m);
+    // Root flare at the trunk foot, squashed flat, slightly sunk.
+    p.set(x, h + 0.25 * scale, z);
+    s.set(scale, scale * 0.45, scale);
+    m.compose(p, q, s);
+    roots.setMatrixAt(placed, m);
+    // Per-instance colour jitter so no two trees match.
+    canopyCol.setHex(0x2f5d33).offsetHSL(rng.range(-0.03, 0.03), rng.range(-0.08, 0.08), rng.range(-0.06, 0.06));
+    canopies.setColorAt(placed, canopyCol);
+    trunkCol.setHex(0x6b4a2f).offsetHSL(0, 0, rng.range(-0.05, 0.05));
+    trunks.setColorAt(placed, trunkCol);
+    placed += 1;
+  }
+  // Weeping cluster over the dock approach: a dozen drooping canopies
+  // leaning over the water at the river bend, so the mail-drop approach
+  // flies under them.
+  const weep = VARIANTS[2];
+  for (let i = 0; i < 12; i += 1) {
+    if (placed >= count) break;
+    const z = rng.range(380, 560);
+    const side = i % 2 === 0 ? -1 : 1;
+    const x = riverX(z) + side * (riverWidthAt(z) / 2 + rng.range(9, 18));
+    const h = terrainHeightAt(x, z);
+    if (h < 4) continue;
+    const scale = rng.range(1.1, 1.6);
+    // Lean toward the river.
+    const lean = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), side * -0.12);
+    q.setFromAxisAngle(up, rng.range(0, Math.PI * 2)).multiply(lean);
+    p.set(x, h + 2.2 * scale * weep.trunkY, z);
+    s.set(scale, scale * weep.trunkY, scale);
+    m.compose(p, q, s);
+    trunks.setMatrixAt(placed, m);
+    p.y = h + (5 * weep.trunkY + 4.2 * weep.canopyY + weep.canopyDy * 9) * scale;
+    s.set(scale * weep.canopyX, scale * weep.canopyY, scale * weep.canopyX);
+    m.compose(p, q, s);
+    canopies.setMatrixAt(placed, m);
+    p.set(x, h + 0.25 * scale, z);
+    s.set(scale, scale * 0.45, scale);
+    m.compose(p, q, s);
+    roots.setMatrixAt(placed, m);
+    canopyCol.setHex(0x2f5d33).offsetHSL(rng.range(-0.03, 0.03), rng.range(-0.08, 0.08), rng.range(-0.06, 0.06));
+    canopies.setColorAt(placed, canopyCol);
+    trunkCol.setHex(0x6b4a2f).offsetHSL(0, 0, rng.range(-0.05, 0.05));
+    trunks.setColorAt(placed, trunkCol);
     placed += 1;
   }
   trunks.count = placed;
   canopies.count = placed;
+  roots.count = placed;
   trunks.castShadow = true;
   canopies.castShadow = true;
   scene.add(trunks);
   scene.add(canopies);
+  scene.add(roots);
+}
+
+function buildReeds(scene, rng) {
+  // Crossed tapered quads (two perpendicular planes, 4 triangles each):
+  // dark-green base -> straw tip via vertex colour, ~8 triangles per
+  // tuft, instanced in a 2-6 m band along both banks. Same wind shader
+  // as the trees, one shared uTime.
+  const pos = new Float32Array([
+    // Quad A (facing +Z)
+    -0.28, 0, 0, 0.28, 0, 0, -0.06, 2.2, 0, 0.06, 2.2, 0,
+    // Quad B (facing +X)
+    0, 0, -0.28, 0, 0, 0.28, 0, 2.2, -0.06, 0, 2.2, 0.06,
+  ]);
+  const col = new Float32Array([
+    0.10, 0.22, 0.08, 0.10, 0.22, 0.08, 0.75, 0.62, 0.35, 0.75, 0.62, 0.35,
+    0.10, 0.22, 0.08, 0.10, 0.22, 0.08, 0.75, 0.62, 0.35, 0.75, 0.62, 0.35,
+  ]);
+  const idx = [0, 1, 2, 1, 3, 2, 4, 5, 6, 5, 7, 6];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 1, side: THREE.DoubleSide,
+  });
+  addWindSway(mat, 2.2, 0);
+  const count = 480;
+  const reeds = new THREE.InstancedMesh(geo, mat, count);
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+  let placed = 0;
+  let guard = 0;
+  while (placed < count && guard < count * 40) {
+    guard += 1;
+    const z = rng.range(-1150, 1150);
+    const side = rng.nextFloat() < 0.5 ? -1 : 1;
+    const half = riverWidthAt(z) / 2;
+    const x = riverX(z) + side * (half + rng.range(0.5, 6));
+    if (z > 800 && z < 1200) continue; // keep the runway banks clear
+    if (Math.hypot(x - DOCK_POS.x, z - DOCK_POS.z) < 45) continue;
+    const h = terrainHeightAt(x, z);
+    const scale = rng.range(0.7, 1.5);
+    q.setFromAxisAngle(up, rng.range(0, Math.PI * 2));
+    p.set(x, Math.max(h, -0.2), z); // base may sit in the shallows
+    s.setScalar(scale);
+    m.compose(p, q, s);
+    reeds.setMatrixAt(placed, m);
+    placed += 1;
+  }
+  reeds.count = placed;
+  scene.add(reeds);
+}
+
+function buildLilyPads(scene, rng) {
+  // Flat dark-green discs with a wedge cut, scattered on the calm water
+  // near the dock. They mark the water-landing target: land between the
+  // pads, not on them.
+  const geo = new THREE.CircleGeometry(1.3, 10, 0, Math.PI * 1.7);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x2a4d2a, roughness: 0.8, side: THREE.DoubleSide });
+  const count = 26;
+  const pads = new THREE.InstancedMesh(geo, mat, count);
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  const e = new THREE.Euler();
+  let placed = 0;
+  let guard = 0;
+  while (placed < count && guard < count * 40) {
+    guard += 1;
+    const x = DOCK_POS.x + rng.range(-70, 70);
+    const z = DOCK_POS.z + rng.range(-70, 70);
+    if (!isWaterAt(x, z)) continue;
+    if (Math.hypot(x - DOCK_POS.x, z - DOCK_POS.z) < 12) continue; // keep the dock clear
+    e.set(-Math.PI / 2, 0, rng.range(0, Math.PI * 2));
+    q.setFromEuler(e);
+    p.set(x, 0.06, z);
+    s.setScalar(rng.range(0.7, 1.6));
+    m.compose(p, q, s);
+    pads.setMatrixAt(placed, m);
+    placed += 1;
+  }
+  pads.count = placed;
+  scene.add(pads);
+}
+
+function buildHeron(scene) {
+  // One static heron standing in the reeds near the dock: a bent-neck
+  // silhouette from a few boxes (koi-pond lesson — ambient life can be
+  // cheap and non-interactive). Only reads from the air; costs 1 draw call.
+  const grey = new THREE.MeshStandardMaterial({ color: 0x8a94a0, roughness: 0.9 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x3a4048, roughness: 0.9 });
+  const heron = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.35, 0.45), grey);
+  body.position.y = 1.15;
+  heron.add(body);
+  const neckLow = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.55, 0.12), grey);
+  neckLow.position.set(0.42, 1.5, 0);
+  neckLow.rotation.z = -0.25;
+  heron.add(neckLow);
+  const neckHigh = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.12), grey);
+  neckHigh.position.set(0.55, 1.85, 0);
+  neckHigh.rotation.z = 0.5;
+  heron.add(neckHigh);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.16), dark);
+  head.position.set(0.72, 2.0, 0);
+  heron.add(head);
+  const beak = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.4, 6), new THREE.MeshStandardMaterial({ color: 0xd8a03c, roughness: 0.7 }));
+  beak.rotation.z = -Math.PI / 2;
+  beak.position.set(0.95, 2.0, 0);
+  heron.add(beak);
+  for (const sx of [-0.18, 0.18]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.0, 5), dark);
+    leg.position.set(sx, 0.5, 0);
+    heron.add(leg);
+  }
+  const x = riverX(600) + riverWidthAt(600) / 2 + 5;
+  const z = 645;
+  heron.position.set(x, Math.max(terrainHeightAt(x, z), 0.1), z);
+  heron.rotation.y = Math.PI; // faces the river
+  scene.add(heron);
+}
+
+function buildFoam(scene) {
+  // Shoreline foam: one thin white band hugging each bank, following the
+  // river centreline (coastline lesson — cheap win, not an AAA ocean).
+  // Opacity pulses with sin(time) in updateWorld.
+  const rows = 101;
+  const positions = new Float32Array(rows * 4 * 3);
+  const indices = [];
+  for (let i = 0; i < rows; i += 1) {
+    const z = -1200 + (i * 2400) / (rows - 1);
+    const half = riverWidthAt(z) / 2;
+    const cx = riverX(z);
+    // Left bank (inner, outer), right bank (inner, outer).
+    const verts = [
+      cx - half - 0.5, 0.08, z,
+      cx - half - 4.5, 0.08, z,
+      cx + half + 0.5, 0.08, z,
+      cx + half + 4.5, 0.08, z,
+    ];
+    positions.set(verts, i * 12);
+    if (i > 0) {
+      const a = (i - 1) * 4;
+      const b = i * 4;
+      indices.push(a, b, a + 1, b, b + 1, a + 1);
+      indices.push(a + 2, b + 2, a + 3, b + 2, b + 3, a + 3);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.28,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const foam = new THREE.Mesh(geo, mat);
+  scene.add(foam);
+  worldRefs.foam = foam;
 }
 
 function buildVillage(scene, rng) {
@@ -485,6 +827,10 @@ export function buildWorld(scene, seed) {
   buildTerrain(scene);
   buildSkyAndWater(scene);
   buildTrees(scene, deriveChild(rng, 11));
+  buildReeds(scene, deriveChild(rng, 41));
+  buildLilyPads(scene, deriveChild(rng, 43));
+  buildHeron(scene);
+  buildFoam(scene);
   buildVillage(scene, deriveChild(rng, 23));
   buildRings(scene);
   buildDockAndRunway(scene);
@@ -492,6 +838,13 @@ export function buildWorld(scene, seed) {
 }
 
 export function updateWorld(timeSeconds) {
+  // Shared wind clock: trees, reeds and gulls all read the same uTime.
+  windUniforms.uTime.value = timeSeconds;
+  windUniforms.uWindAmp.value = 0.2 + Math.abs(state.windX) * 0.06;
+  // Shoreline foam breathes with the water.
+  if (worldRefs.foam) {
+    worldRefs.foam.material.opacity = 0.22 + 0.12 * Math.sin(timeSeconds * 1.1);
+  }
   if (worldRefs.water) {
     worldRefs.water.material.uniforms.time.value += 1 / 60;
   }

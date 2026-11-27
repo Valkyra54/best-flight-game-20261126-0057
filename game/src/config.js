@@ -85,7 +85,7 @@ export const DELTA_POST = {
     masterVolume: 0.5,
   },
   // Dawn sun: low in the east, warm. Elevation 7 degrees, azimuth 90 (east).
-  sun: { elevationDeg: 7, azimuthDeg: 92, turbidity: 6, rayleigh: 2.6 },
+  sun: { elevationDeg: 7, azimuthDeg: 92, turbidity: 4, rayleigh: 2.0 },
   colors: {
     dawnSkyTop: 0x2e4a7a,
     dawnHorizon: 0xffb36b,

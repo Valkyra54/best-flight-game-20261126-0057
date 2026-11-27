@@ -8,6 +8,8 @@ import { DELTA_POST } from './config.js';
 import { state, Phases } from './gameState.js';
 import { on, Events } from './eventBus.js';
 import { buildWorld, updateWorld, updatePapi } from './world.js';
+import { buildGulls, updateGulls } from './gulls.js';
+import { buildWake, updateWake } from './wake.js';
 import { buildAircraft, poseAircraft } from './aircraft.js';
 import { stepFlight, FIXED_DT } from './flight.js';
 import { startSortie, updateMissions, requestDrop, onTouchdown, onCrash } from './missions.js';
@@ -54,6 +56,8 @@ function init() {
   camera = makeCamera();
 
   buildWorld(scene, SEED);
+  buildGulls(scene);
+  buildWake(scene);
   aircraft = buildAircraft();
   scene.add(aircraft.group);
 
@@ -108,8 +112,10 @@ function loop() {
   poseAircraft(aircraft, dt);
   updateCamera(camera, dt, timeSeconds);
   updateWorld(timeSeconds);
+  updateGulls(timeSeconds);
+  updateWake(dt, timeSeconds);
   updatePapi();
-  updateHud();
+  updateHud(camera);
   updateEngineSound();
   renderFrame(renderer, scene, camera);
   framesRendered += 1;
